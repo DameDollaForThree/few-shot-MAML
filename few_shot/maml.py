@@ -1,3 +1,4 @@
+from select import select
 import torch
 from collections import OrderedDict
 from torch.optim import Optimizer
@@ -6,14 +7,13 @@ from typing import Dict, List, Callable, Union
 
 from few_shot.core import create_nshot_task_label
 
-
 def replace_grad(parameter_gradients, parameter_name):
     def replace_grad_(module):
         return parameter_gradients[parameter_name]
 
     return replace_grad_
 
-
+# I added another argument 'other_optim'
 def meta_gradient_step(model: Module,
                        optimiser: Optimizer,
                        loss_fn: Callable,
@@ -26,13 +26,16 @@ def meta_gradient_step(model: Module,
                        inner_train_steps: int,
                        inner_lr: float,
                        train: bool,
-                       device: Union[str, torch.device]):
+                       device: Union[str, torch.device],
+                       other_optim: List[Optimizer] = None, 
+                       p_task: List[int] = None,
+                       p_meta: List[int] = None):
     """
     Perform a gradient step on a meta-learner.
 
     # Arguments
         model: Base model of the meta-learner being trained
-        optimiser: Optimiser to calculate gradient step from loss
+        optimiser: Optimiser to calculate gradient step from loss  
         loss_fn: Loss function to calculate between predictions and outputs
         x: Input samples for all few shot tasks
         y: Input labels of all few shot tasks
@@ -48,13 +51,17 @@ def meta_gradient_step(model: Module,
         train: Whether to update the meta-learner weights at the end of the episode.
         device: Device on which to run computation
     """
+    if other_optim != None:
+        meta_conv_optim, meta_other_optim = other_optim
+    
     data_shape = x.shape[2:]
     create_graph = (True if order == 2 else False) and train
 
     task_gradients = []
     task_losses = []
     task_predictions = []
-    for meta_batch in x:
+    # iterate through each task in the meta batch
+    for j, meta_batch in enumerate(x):
         # By construction x is a 5D tensor of shape: (meta_batch_size, n*k + q*k, channels, width, height)
         # Hence when we iterate over the first  dimension we are iterating through the meta batches
         x_task_train = meta_batch[:n_shot * k_way]
@@ -62,26 +69,59 @@ def meta_gradient_step(model: Module,
 
         # Create a fast model using the current meta model weights
         fast_weights = OrderedDict(model.named_parameters())
-
+        
         # Train the model for `inner_train_steps` iterations
         for inner_batch in range(inner_train_steps):
             # Perform update of model weights
-            y = create_nshot_task_label(k_way, n_shot).to(device)
+            y = create_nshot_task_label(k_way, n_shot).to(device)  # TODO: pseudo-label???
             logits = model.functional_forward(x_task_train, fast_weights)
             loss = loss_fn(logits, y)
             gradients = torch.autograd.grad(loss, fast_weights.values(), create_graph=create_graph)
-
-            # Update weights manually
-            fast_weights = OrderedDict(
-                (name, param - inner_lr * grad)
-                for ((name, param), grad) in zip(fast_weights.items(), gradients)
-            )
-
+            
+            ###### filter selection based on batchnorm ###### 
+            if train:
+                # Update weights manually: first, only update batch_norm and FC weights!!!
+                fast_weights = OrderedDict(
+                    (name, param - inner_lr * grad) if name[0:5] == 'other' else (name, param)
+                    for ((name, param), grad) in zip(fast_weights.items(), gradients)
+                )
+                
+                with torch.no_grad():
+                    # compute mask according to fast_weights and p_list
+                    masks = OrderedDict()
+                    for i in range(4):
+                        bn_gammas = fast_weights[f'other_param.{i*2}']
+                        num_filter = bn_gammas.shape[0]
+                        selected = torch.topk(bn_gammas, int(num_filter * p_task[i-1]))[1]
+                        masks[f'conv_param.{i*2}'] = torch.zeros_like(fast_weights[f'conv_param.{i*2}'])
+                        masks[f'conv_param.{i*2}'][selected, :, :, :] = 1
+                        masks[f'conv_param.{i*2+1}'] = torch.zeros_like(fast_weights[f'conv_param.{i*2+1}'])
+                        masks[f'conv_param.{i*2+1}'][selected] = 1
+                        
+                    for i in range(4):
+                        bn_gammas = fast_weights[f'other_param.{i*2}']
+                        masks[f'other_param.{i*2}'] = torch.zeros(bn_gammas.shape[0])
+                        masks[f'other_param.{i*2+1}'] = torch.zeros(bn_gammas.shape[0])
+                    masks['other_param.8'] = torch.zeros_like(fast_weights['other_param.8'])
+                    masks['other_param.9'] = torch.zeros_like(fast_weights['other_param.9'])
+                
+                # Update weights manually: second, updates conv layers with masks!!!
+                fast_weights = OrderedDict(
+                    (name, param - inner_lr * grad * mask.cuda()) if name[0:5] != 'other' else (name, param)
+                    for ((name, param), grad, (_, mask)) in zip(fast_weights.items(), gradients, masks.items())
+                )
+                
+            else:
+                fast_weights = OrderedDict(
+                    (name, param - inner_lr * grad)
+                    for ((name, param), grad) in zip(fast_weights.items(), gradients)
+                )
+            
         # Do a pass of the model on the validation data from the current task
         y = create_nshot_task_label(k_way, q_queries).to(device)
         logits = model.functional_forward(x_task_val, fast_weights)
         loss = loss_fn(logits, y)
-        loss.backward(retain_graph=True)
+        # loss.backward(retain_graph=True)  # backward(): computes grad, doesn't update/.step() --> not necessary...
 
         # Get post-update accuracies
         y_pred = logits.softmax(dim=1)
@@ -118,13 +158,36 @@ def meta_gradient_step(model: Module,
         return torch.stack(task_losses).mean(), torch.cat(task_predictions)
 
     elif order == 2:
-        model.train()
+        model.train()  # set the model in train mode
         optimiser.zero_grad()
         meta_batch_loss = torch.stack(task_losses).mean()
+        # print("meta_batch_loss: ", meta_batch_loss)
 
         if train:
+            meta_conv_optim.zero_grad()
+            meta_other_optim.zero_grad()
             meta_batch_loss.backward()
-            optimiser.step()
+            meta_other_optim.step()
+            
+            with torch.no_grad():
+                    # compute and apply mask according to other_param and p_list
+                    for i in range(4):
+                        bn_gammas = model.other_param[i*2]
+                        conv_weight = model.conv_param[i*2]
+                        conv_bias = model.conv_param[i*2 + 1]
+                        
+                        num_filter = bn_gammas.shape[0]
+                        selected = torch.topk(bn_gammas, int(num_filter * p_meta[i-1]))[1]
+                        
+                        conv_weight_mask = torch.zeros_like(conv_weight)
+                        conv_weight_mask[selected, :, :, :] = 1
+                        conv_weight.grad *= conv_weight_mask
+                        
+                        conv_bias_mask = torch.zeros_like(conv_bias)
+                        conv_bias_mask[selected] = 1
+                        conv_bias.grad *= conv_bias_mask
+    
+            meta_conv_optim.step()
 
         return meta_batch_loss, torch.cat(task_predictions)
     else:

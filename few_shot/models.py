@@ -39,19 +39,25 @@ class GlobalAvgPool2d(nn.Module):
         return nn.functional.avg_pool2d(input, kernel_size=input.size()[2:]).view(-1, input.size(1))
 
 
-def conv_block(in_channels: int, out_channels: int) -> nn.Module:
+def conv_block(in_channels: int, out_channels: int, conv_param_list=None, other_param_list=None) -> nn.Module:
     """Returns a Module that performs 3x3 convolution, ReLu activation, 2x2 max pooling.
 
     # Arguments
         in_channels:
         out_channels:
     """
-    return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, 3, padding=1),
-        nn.BatchNorm2d(out_channels),
-        nn.ReLU(),
-        nn.MaxPool2d(kernel_size=2, stride=2)
-    )
+    conv = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+    bn = nn.BatchNorm2d(out_channels)
+    relu = nn.ReLU()
+    maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
+    
+    if conv_param_list != None and other_param_list != None:
+        conv_param_list.append(conv.weight)
+        conv_param_list.append(conv.bias)
+        other_param_list.append(bn.weight)
+        other_param_list.append(bn.bias)
+    
+    return nn.Sequential(conv, bn, relu, maxpool)
 
 
 def functional_conv_block(x: torch.Tensor, weights: torch.Tensor, biases: torch.Tensor,
@@ -105,12 +111,18 @@ class FewShotClassifier(nn.Module):
             final_layer_size: 64 for Omniglot, 1600 for miniImageNet
         """
         super(FewShotClassifier, self).__init__()
-        self.conv1 = conv_block(num_input_channels, 64)
-        self.conv2 = conv_block(64, 64)
-        self.conv3 = conv_block(64, 64)
-        self.conv4 = conv_block(64, 64)
+        # separate conv and other parameters
+        self.conv_param = nn.ParameterList()
+        self.other_param = nn.ParameterList()
+        
+        self.conv1 = conv_block(num_input_channels, 64, self.conv_param, self.other_param)
+        self.conv2 = conv_block(64, 64, self.conv_param, self.other_param)
+        self.conv3 = conv_block(64, 64, self.conv_param, self.other_param)
+        self.conv4 = conv_block(64, 64, self.conv_param, self.other_param)
 
-        self.logits = nn.Linear(final_layer_size, k_way)
+        self.logits = nn.Linear(final_layer_size, k_way)    
+        self.other_param.append(self.logits.weight)
+        self.other_param.append(self.logits.bias)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -125,13 +137,19 @@ class FewShotClassifier(nn.Module):
     def functional_forward(self, x, weights):
         """Applies the same forward pass using PyTorch functional operators using a specified set of weights."""
 
-        for block in [1, 2, 3, 4]:
-            x = functional_conv_block(x, weights[f'conv{block}.0.weight'], weights[f'conv{block}.0.bias'],
-                                      weights.get(f'conv{block}.1.weight'), weights.get(f'conv{block}.1.bias'))
+        # for block in [1, 2, 3, 4]:
+            # x = functional_conv_block(x, weights[f'conv{block}.0.weight'], weights[f'conv{block}.0.bias'],
+            #                           weights.get(f'conv{block}.1.weight'), weights.get(f'conv{block}.1.bias'))
+        
+        # new dictionary keys
+        for i in range(4):
+            x = functional_conv_block(x, weights[f'conv_param.{i*2}'], weights[f'conv_param.{i*2+1}'],
+                                      weights.get(f'other_param.{i*2}'), weights.get(f'other_param.{i*2+1}'))
 
         x = x.view(x.size(0), -1)
 
-        x = F.linear(x, weights['logits.weight'], weights['logits.bias'])
+        # x = F.linear(x, weights['logits.weight'], weights['logits.bias'])
+        x = F.linear(x, weights['other_param.8'], weights['other_param.9'])
 
         return x
 

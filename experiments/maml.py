@@ -24,6 +24,11 @@ torch.backends.cudnn.benchmark = True
 ##############
 # Parameters #
 ##############
+p_task = [0.9, 0.9, 0.9, 0.9]
+p_meta = [1, 1, 1, 1]
+print("p_task: ", p_task)
+print("p_meta: ", p_meta)
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset')
 parser.add_argument('--n', default=1, type=int)
@@ -80,8 +85,12 @@ evaluation_taskloader = DataLoader(
 # Training #
 ############
 print(f'Training MAML on {args.dataset}...')
+
+# need to seperate conv parameters and other (batchnorm/FC) parameters 
 meta_model = FewShotClassifier(num_input_channels, args.k, fc_layer_size).to(device, dtype=torch.double)
 meta_optimiser = torch.optim.Adam(meta_model.parameters(), lr=args.meta_lr)
+meta_conv_optimiser = torch.optim.Adam(meta_model.conv_param, lr=args.meta_lr)
+meta_other_optimiser = torch.optim.Adam(meta_model.other_param, lr=args.meta_lr)
 loss_fn = nn.CrossEntropyLoss().to(device)
 
 
@@ -117,11 +126,11 @@ callbacks = [
         order=args.order,
     ),
     ModelCheckpoint(
-        filepath=PATH + f'/models/maml/{param_str}.pth',
+        filepath=PATH + f'/models/maml/{param_str}/pt={p_task};pm={p_meta}.pth',
         monitor=f'val_{args.n}-shot_{args.k}-way_acc'
     ),
-    ReduceLROnPlateau(patience=10, factor=0.5, monitor=f'val_loss'),
-    CSVLogger(PATH + f'/logs/maml/{param_str}.csv'),
+    ReduceLROnPlateau(patience=5, factor=0.5, monitor=f'val_loss'),  # I changed patience from 10 to 5
+    CSVLogger(PATH + f'/logs/maml/{param_str}/pt={p_task};pm={p_meta}.csv'),
 ]
 
 
@@ -134,6 +143,9 @@ fit(
     prepare_batch=prepare_meta_batch(args.n, args.k, args.q, args.meta_batch_size),
     callbacks=callbacks,
     metrics=['categorical_accuracy'],
+    other_optim=[meta_conv_optimiser, meta_other_optimiser],
+    p_task=p_task,
+    p_meta=p_meta,
     fit_function=meta_gradient_step,
     fit_function_kwargs={'n_shot': args.n, 'k_way': args.k, 'q_queries': args.q,
                          'train': True,
