@@ -24,7 +24,7 @@ torch.backends.cudnn.benchmark = True
 ##############
 # Parameters #
 ##############
-p_task = [0.9, 0.9, 0.9, 0.9]
+p_task = [1, 1, 1, 1]
 p_meta = [1, 1, 1, 1]
 print("p_task: ", p_task)
 print("p_meta: ", p_meta)
@@ -129,7 +129,7 @@ callbacks = [
         filepath=PATH + f'/models/maml/{param_str}/pt={p_task};pm={p_meta}.pth',
         monitor=f'val_{args.n}-shot_{args.k}-way_acc'
     ),
-    ReduceLROnPlateau(patience=5, factor=0.5, monitor=f'val_loss'),  # I changed patience from 10 to 5
+    ReduceLROnPlateau(patience=7, factor=0.5, monitor=f'val_loss'),  # I changed patience
     CSVLogger(PATH + f'/logs/maml/{param_str}/pt={p_task};pm={p_meta}.csv'),
 ]
 
@@ -143,9 +143,9 @@ fit(
     prepare_batch=prepare_meta_batch(args.n, args.k, args.q, args.meta_batch_size),
     callbacks=callbacks,
     metrics=['categorical_accuracy'],
-    other_optim=[meta_conv_optimiser, meta_other_optimiser],
-    p_task=p_task,
-    p_meta=p_meta,
+    other_optim=[meta_conv_optimiser, meta_other_optimiser],  # added by me
+    p_task=p_task,  # added by me
+    p_meta=p_meta,  # added by me
     fit_function=meta_gradient_step,
     fit_function_kwargs={'n_shot': args.n, 'k_way': args.k, 'q_queries': args.q,
                          'train': True,

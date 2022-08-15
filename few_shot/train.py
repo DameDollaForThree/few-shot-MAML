@@ -55,7 +55,7 @@ def batch_metrics(model: Module, y_pred: torch.Tensor, y: torch.Tensor, metrics:
 # I added another argument 'other_optim'
 def fit(model: Module, optimiser: Optimizer, loss_fn: Callable, epochs: int, dataloader: DataLoader,
         prepare_batch: Callable, metrics: List[Union[str, Callable]] = None, callbacks: List[Callback] = None,
-        other_optim: List[Optimizer] = None, p_task: List[int] = None, p_meta: List[int] = None, 
+        other_optim: List[Optimizer] = None, p_task: List[int] = None, p_meta: List[int] = None,   # added by me
         verbose: bool =True, fit_function: Callable = gradient_step, fit_function_kwargs: dict = {}):
     """Function to abstract away training loop.
 

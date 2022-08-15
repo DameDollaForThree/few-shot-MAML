@@ -27,9 +27,9 @@ def meta_gradient_step(model: Module,
                        inner_lr: float,
                        train: bool,
                        device: Union[str, torch.device],
-                       other_optim: List[Optimizer] = None, 
-                       p_task: List[int] = None,
-                       p_meta: List[int] = None):
+                       other_optim: List[Optimizer] = None,  # added by me
+                       p_task: List[int] = None,  # added by me
+                       p_meta: List[int] = None):  # added by me
     """
     Perform a gradient step on a meta-learner.
 
@@ -87,7 +87,7 @@ def meta_gradient_step(model: Module,
                 )
                 
                 with torch.no_grad():
-                    # compute mask according to fast_weights and p_list
+                    # compute mask according to bn_gammas and p_list
                     masks = OrderedDict()
                     for i in range(4):
                         bn_gammas = fast_weights[f'other_param.{i*2}']
@@ -97,7 +97,8 @@ def meta_gradient_step(model: Module,
                         masks[f'conv_param.{i*2}'][selected, :, :, :] = 1
                         masks[f'conv_param.{i*2+1}'] = torch.zeros_like(fast_weights[f'conv_param.{i*2+1}'])
                         masks[f'conv_param.{i*2+1}'][selected] = 1
-                        
+                    
+                    # zero mask for other params
                     for i in range(4):
                         bn_gammas = fast_weights[f'other_param.{i*2}']
                         masks[f'other_param.{i*2}'] = torch.zeros(bn_gammas.shape[0])
@@ -133,6 +134,7 @@ def meta_gradient_step(model: Module,
         named_grads = {name: g for ((name, _), g) in zip(fast_weights.items(), gradients)}
         task_gradients.append(named_grads)
 
+    # I didn't use order == 1.
     if order == 1:
         if train:
             sum_task_gradients = {k: torch.stack([grad[k] for grad in task_gradients]).mean(dim=0)
@@ -157,12 +159,12 @@ def meta_gradient_step(model: Module,
 
         return torch.stack(task_losses).mean(), torch.cat(task_predictions)
 
+    # I use order == 2.
     elif order == 2:
         model.train()  # set the model in train mode
         optimiser.zero_grad()
-        meta_batch_loss = torch.stack(task_losses).mean()
-        # print("meta_batch_loss: ", meta_batch_loss)
-
+        meta_batch_loss = torch.stack(task_losses).mean()   
+            
         if train:
             meta_conv_optim.zero_grad()
             meta_other_optim.zero_grad()
