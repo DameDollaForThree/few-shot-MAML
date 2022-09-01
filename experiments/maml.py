@@ -129,7 +129,7 @@ callbacks = [
         filepath=PATH + f'/models/maml/{param_str}/pt={p_task};pm={p_meta}.pth',
         monitor=f'val_{args.n}-shot_{args.k}-way_acc'
     ),
-    ReduceLROnPlateau(patience=7, factor=0.5, monitor=f'val_loss'),  # I changed patience
+    ReduceLROnPlateau(patience=10, factor=0.5, monitor=f'val_loss'),  # I changed patience
     CSVLogger(PATH + f'/logs/maml/{param_str}/pt={p_task};pm={p_meta}.csv'),
 ]
 

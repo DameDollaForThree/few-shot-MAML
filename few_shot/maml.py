@@ -4,6 +4,7 @@ from collections import OrderedDict
 from torch.optim import Optimizer
 from torch.nn import Module
 from typing import Dict, List, Callable, Union
+import copy
 
 from few_shot.core import create_nshot_task_label
 
@@ -29,7 +30,9 @@ def meta_gradient_step(model: Module,
                        device: Union[str, torch.device],
                        other_optim: List[Optimizer] = None,  # added by me
                        p_task: List[int] = None,  # added by me
-                       p_meta: List[int] = None):  # added by me
+                       p_meta: List[int] = None,  # added by me
+                       origin = True  # added by me
+                       ):  
     """
     Perform a gradient step on a meta-learner.
 
@@ -69,7 +72,9 @@ def meta_gradient_step(model: Module,
 
         # Create a fast model using the current meta model weights
         fast_weights = OrderedDict(model.named_parameters())
-        
+        # fast_weights_2 = OrderedDict(model.named_parameters())
+        # print(fast_weights_1['conv_param.0'][1,1,1,:])
+
         # Train the model for `inner_train_steps` iterations
         for inner_batch in range(inner_train_steps):
             # Perform update of model weights
@@ -80,43 +85,54 @@ def meta_gradient_step(model: Module,
             
             ###### filter selection based on batchnorm ###### 
             if train:
-                # Update weights manually: first, only update batch_norm and FC weights!!!
-                fast_weights = OrderedDict(
-                    (name, param - inner_lr * grad) if name[0:5] == 'other' else (name, param)
-                    for ((name, param), grad) in zip(fast_weights.items(), gradients)
-                )
                 
-                with torch.no_grad():
-                    # compute mask according to bn_gammas and p_list
-                    masks = OrderedDict()
-                    for i in range(4):
-                        bn_gammas = fast_weights[f'other_param.{i*2}']
-                        num_filter = bn_gammas.shape[0]
-                        selected = torch.topk(bn_gammas, int(num_filter * p_task[i-1]))[1]
-                        masks[f'conv_param.{i*2}'] = torch.zeros_like(fast_weights[f'conv_param.{i*2}'])
-                        masks[f'conv_param.{i*2}'][selected, :, :, :] = 1
-                        masks[f'conv_param.{i*2+1}'] = torch.zeros_like(fast_weights[f'conv_param.{i*2+1}'])
-                        masks[f'conv_param.{i*2+1}'][selected] = 1
+                if origin:
+                    fast_weights = OrderedDict(
+                        (name, param - inner_lr * grad)
+                        for ((name, param), grad) in zip(fast_weights.items(), gradients)
+                    )
+                # print('fast_1: ', fast_weights_1['conv_param.0'][1,1,1,:])
+                
+                else:
+                    # Update weights manually: first, only update batch_norm and FC weights!!!
+                    fast_weights = OrderedDict(
+                        (name, param - inner_lr * grad) if name[0:5] == 'other' else (name, param)
+                        for ((name, param), grad) in zip(fast_weights.items(), gradients)
+                    )
                     
-                    # zero mask for other params
-                    for i in range(4):
-                        bn_gammas = fast_weights[f'other_param.{i*2}']
-                        masks[f'other_param.{i*2}'] = torch.zeros(bn_gammas.shape[0])
-                        masks[f'other_param.{i*2+1}'] = torch.zeros(bn_gammas.shape[0])
-                    masks['other_param.8'] = torch.zeros_like(fast_weights['other_param.8'])
-                    masks['other_param.9'] = torch.zeros_like(fast_weights['other_param.9'])
-                
-                # Update weights manually: second, updates conv layers with masks!!!
-                fast_weights = OrderedDict(
-                    (name, param - inner_lr * grad * mask.cuda()) if name[0:5] != 'other' else (name, param)
-                    for ((name, param), grad, (_, mask)) in zip(fast_weights.items(), gradients, masks.items())
-                )
+                    with torch.no_grad():
+                        # compute mask according to bn_gammas and p_list
+                        masks = OrderedDict()
+                        for i in range(4):
+                            bn_gammas = fast_weights[f'other_param.{i*2}']
+                            num_filter = bn_gammas.shape[0]
+                            selected = torch.topk(bn_gammas, int(num_filter * p_task[i-1]))[1]
+                            masks[f'conv_param.{i*2}'] = torch.zeros_like(fast_weights[f'conv_param.{i*2}'])
+                            masks[f'conv_param.{i*2}'][selected, :, :, :] = 1
+                            masks[f'conv_param.{i*2+1}'] = torch.zeros_like(fast_weights[f'conv_param.{i*2+1}'])
+                            masks[f'conv_param.{i*2+1}'][selected] = 1
+                        
+                        # zero mask for other params
+                        for i in range(4):
+                            bn_gammas = fast_weights[f'other_param.{i*2}']
+                            masks[f'other_param.{i*2}'] = torch.zeros(bn_gammas.shape[0])
+                            masks[f'other_param.{i*2+1}'] = torch.zeros(bn_gammas.shape[0])
+                        masks['other_param.8'] = torch.zeros_like(fast_weights['other_param.8'])
+                        masks['other_param.9'] = torch.zeros_like(fast_weights['other_param.9'])
+                    
+                    # Update weights manually: second, updates conv layers with masks!!!
+                    fast_weights = OrderedDict(
+                        (name, param - inner_lr * grad * mask.cuda()) if name[0:5] != 'other' else (name, param)
+                        for ((name, param), grad, (_, mask)) in zip(fast_weights.items(), gradients, masks.items())
+                    )
+                    # print('fast_2: ', fast_weights_2['conv_param.0'][1,1,1,:])
                 
             else:
                 fast_weights = OrderedDict(
                     (name, param - inner_lr * grad)
                     for ((name, param), grad) in zip(fast_weights.items(), gradients)
                 )
+            # print(fast_weights['conv_param.0'][1,1,1,:])
             
         # Do a pass of the model on the validation data from the current task
         y = create_nshot_task_label(k_way, q_queries).to(device)
@@ -160,18 +176,29 @@ def meta_gradient_step(model: Module,
         return torch.stack(task_losses).mean(), torch.cat(task_predictions)
 
     # I use order == 2.
-    elif order == 2:
+    elif order == 2: 
         model.train()  # set the model in train mode
         optimiser.zero_grad()
         meta_batch_loss = torch.stack(task_losses).mean()   
-            
+        # model_to_load_state = copy.deepcopy(model.state_dict())
+        
         if train:
-            meta_conv_optim.zero_grad()
-            meta_other_optim.zero_grad()
-            meta_batch_loss.backward()
-            meta_other_optim.step()
             
-            with torch.no_grad():
+            if origin:
+                meta_batch_loss.backward()
+                # print('original: ', model.conv_param[0][1,1,1,:])
+                optimiser.step()
+            
+                # print(OrderedDict(model.named_parameters())['conv_param.0'][1,1,1,:])
+                # print('original: ', model.conv_param[0][1,1,1,:])
+                
+            else:
+                meta_conv_optim.zero_grad()
+                meta_other_optim.zero_grad()
+                meta_batch_loss.backward()      
+                meta_other_optim.step()
+                
+                with torch.no_grad():
                     # compute and apply mask according to other_param and p_list
                     for i in range(4):
                         bn_gammas = model.other_param[i*2]
@@ -188,8 +215,12 @@ def meta_gradient_step(model: Module,
                         conv_bias_mask = torch.zeros_like(conv_bias)
                         conv_bias_mask[selected] = 1
                         conv_bias.grad *= conv_bias_mask
-    
-            meta_conv_optim.step()
+        
+                # print('new: ', model.conv_param[0][1,1,1,:])
+                meta_conv_optim.step()
+                # print('new: ', model.conv_param[0][1,1,1,:])
+                
+        # model.load_state_dict(model_to_load_state)
 
         return meta_batch_loss, torch.cat(task_predictions)
     else:
